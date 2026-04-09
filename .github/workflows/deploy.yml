@@ -3,8 +3,6 @@ name: Deploy Backend
 on:
   push:
     branches: [ main ] # 메인 브랜치에 코드가 푸시될 때 실행됩니다.
-    paths:
-      - 'backend/**'   # backend 폴더 내부의 파일이 변경되었을 때만 트리거됩니다.
 
 jobs:
   deploy:
@@ -21,7 +19,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
-            # 1. 프로젝트 폴더로 이동 (서버 환경에 맞게 폴더 경로를 수정해주세요)
+            # 1. 백엔드 프로젝트 폴더로 이동
             mkdir -p ~/reviewApp-backend
             cd ~/reviewApp-backend
             
@@ -29,8 +27,7 @@ jobs:
             git fetch --all
             git reset --hard origin/main
             
-            # 3. 백엔드 폴더로 이동하여 패키지 설치
-            cd review-backend
+            # 3. 패키지 설치 (repository 최상위에 package.json이 있으므로 바로 실행)
             npm install
             
             # 4. Prisma 클라이언트 생성 (데이터베이스 연동 업데이트)
