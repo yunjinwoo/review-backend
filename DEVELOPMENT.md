@@ -43,4 +43,4 @@
    - `schema.prisma`에 `url = env("DATABASE_URL")`을 정상적으로 추가했습니다.
    - `npx prisma db push` 커맨드를 실행하여 물리적으로 존재하지 않던 `Review` 테이블 스키마를 SQLite 파일 안에 정확하게 생성했습니다.
 
-그 결과 현재 HTTP 요청(`curl http://localhost:5000/api/reviews`)에 대해 에러 없이 완벽하게 데이터를 반환하는 상태가 되었습니다.
+그 결과 현재 HTTP 요청(`curl http://localhost:5050/api/reviews`)에 대해 에러 없이 완벽하게 데이터를 반환하는 상태가 되었습니다.

@@ -4,7 +4,7 @@ import cors from 'cors';
 import reviewRoutes from './routes/review.js';
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 5050;
 
 app.use(cors());
 app.use(express.json());
