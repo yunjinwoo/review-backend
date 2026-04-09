@@ -22,15 +22,15 @@ jobs:
           port: 22
           script: |
             # 1. 프로젝트 폴더로 이동 (서버 환경에 맞게 폴더 경로를 수정해주세요)
-            mkdir -p ~/reviewApp
-            cd ~/reviewApp
+            mkdir -p ~/reviewApp-backend
+            cd ~/reviewApp-backend
             
             # 2. 최신 소스 코드 가져오기
             git fetch --all
             git reset --hard origin/main
             
             # 3. 백엔드 폴더로 이동하여 패키지 설치
-            cd backend
+            cd review-backend
             npm install
             
             # 4. Prisma 클라이언트 생성 (데이터베이스 연동 업데이트)
