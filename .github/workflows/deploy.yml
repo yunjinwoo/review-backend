@@ -2,16 +2,38 @@ name: Deploy Backend
 
 on:
   push:
-    branches: [ main ] # 메인 브랜치에 코드가 푸시될 때 실행됩니다.
+    branches: [ main ] 
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+      - name: 1. 코드를 깃허브 공장으로 가져오기 (Checkout)
         uses: actions/checkout@v4
 
-      - name: Deploy via SSH
+      - name: 2. 깃허브 공장에 Node.js 24버전 설치
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: 3. 깃허브 공장에서 의존성 설치 및 백엔드 초고속 압축(esbuild)
+        run: |
+          cd review-backend
+          npm install
+          npx prisma generate
+          npm run build
+
+      - name: 4. 핵심 구동 파일만 내 서버로 배달 (SCP 전송)
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SERVER_IP }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          port: 22
+          source: "review-backend/dist,review-backend/package.json,review-backend/prisma"
+          target: "~/reviewApp-backend"
+
+      - name: 5. 내 서버에 접속해서 PM2 켜기 (초경량 작업)
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
@@ -19,32 +41,19 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
-            # 1. 백엔드 프로젝트 폴더로 이동
-            mkdir -p ~/reviewApp-backend
-            cd ~/reviewApp-backend
+            cd ~/reviewApp-backend/review-backend
             
-            # 2. 최신 소스 코드 가져오기
-            git fetch --all
-            git reset --hard origin/main
+            # 무거운 devDependencies(타입스크립트 등)를 제외한 실 구동용 패키지만 빠르게 설치
+            npm install --omit=dev
             
-            # 2.1 해당 폴더로 이동
-            cd review-backend
-
-            # 3. 패키지 설치 (repository 최상위에 package.json이 있으므로 바로 실행)
-            npm install
-            
-            # 4. Prisma 클라이언트 생성 (데이터베이스 연동 업데이트)
+            # 리눅스 OS(iwinv)에 맞는 Prisma DB 엔진 바이너리 생성
             npx prisma generate
             
-            # 5. 기존 구동 중인 백엔드 프로세스 중지
+            # 기존 고스트 프로세스 삭제
             pm2 delete backend-app || true
             
-            # 6. 백엔드 서버 시작 (포트 5050을 사용하도록 설정)
-            # 서버 환경에 따라 npm run start(빌드 후 실행)로 수정하시는 것을 권장합니다.
-            pm2 start npm --name "backend-app" -- run dev
+            # tsx watch 대신, 엄청 가벼워진 node 구동 명령어로 서비스 시작
+            pm2 start npm --name "backend-app" -- run start
             
-            # 7. 재부팅 시에도 PM2 서비스가 유지되도록 저장
             pm2 save
-            
-            # 8. PM2 프로세스 상태 출력
             pm2 list
