@@ -16,30 +16,23 @@ jobs:
         with:
           node-version: 24
 
-      - name: 3. 깃허브 공장에서 빌드 및 배포 패키지 압축(메모리 부족 방지)
+      - name: 3. 깃허브 공장에서 빌드만 수행 (패키징 안 함)
         run: |
-          # 1. 통상적인 설치 및 빌드
           npm install
           npx prisma generate
           npm run build
-          
-          # 2. 프로덕션 환경에 불필요한 패키지(dev) 제거하여 용량 다이어트
-          npm prune --omit=dev
-          
-          # 3. 필요한 파일들만 하나로 압축 (단일 파일 전송이 SCP 속도/자원 소모 측면에서 압도적으로 유리)
-          tar -czf deploy.tar.gz dist node_modules package.json prisma
 
-      - name: 4. 단일 배포 패키지 서버로 배달 (SCP 고속 전송)
+      - name: 4. 필수 파일(코드 파일)만 내 서버로 초고속 배달
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-          source: "deploy.tar.gz"
+          source: "dist,package.json,package-lock.json,prisma"
           target: "~/reviewApp-backend"
 
-      - name: 5. 내 서버에 접속해서 압축 풀고 PM2 켜기 (초경량 작업)
+      - name: 5. 내 서버에 접속해서 초경량 모듈 설치 및 PM2 켜기
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
@@ -49,13 +42,16 @@ jobs:
           script: |
             cd ~/reviewApp-backend
             
-            # 엄청 가벼운 압축 해제 작업 (메모리 1/10도 안 씀)
-            tar -xzf deploy.tar.gz
+            # `npm install` 대신 `npm ci`를 사용합니다. (매우 중요)
+            # 트리를 재계산하지 않고 package-lock.json을 보고 다운로드만 하므로 메모리(RAM)를 획기적으로 적게 씁니다!
+            npm ci --omit=dev
+            
+            # 서버용 Prisma 엔진 생성
+            npx prisma generate
             
             # 기존 고스트 프로세스 삭제
             pm2 delete backend-app || true
             
-            # 서버 단에서는 더 이상 npm install이나 npx prisma generate를 하지 않음!
             # 바로 서비스 시작
             pm2 start npm --name "backend-app" -- run start
             
