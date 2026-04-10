@@ -7,6 +7,8 @@ on:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: 1. 코드를 깃허브 공장으로 가져오기 (Checkout)
         uses: actions/checkout@v4
@@ -42,12 +44,14 @@ jobs:
           script: |
             cd ~/reviewApp-backend
             
-            # `npm install` 대신 `npm ci`를 사용합니다. (매우 중요)
-            # 트리를 재계산하지 않고 package-lock.json을 보고 다운로드만 하므로 메모리(RAM)를 획기적으로 적게 씁니다!
-            npm ci --omit=dev
+            # CI 환경임을 명시하여 각종 (Y/N) 질문이나 진행 상태바 표출을 모두 스킵 (타임아웃 방지)
+            export CI=true
             
-            # 서버용 Prisma 엔진 생성
-            npx prisma generate
+            # 불필요한 audit/fund 검사를 생략해 메모리 부하와 속도를 대폭 개선합니다.
+            npm ci --omit=dev --no-audit --no-fund
+            
+            # 서버용 Prisma 엔진 생성 (혹시 모를 Y/N 질문은 --yes로 강제 돌파)
+            npx --yes prisma generate
             
             # 기존 고스트 프로세스 삭제
             pm2 delete backend-app || true
