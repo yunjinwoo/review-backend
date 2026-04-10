@@ -18,23 +18,27 @@ jobs:
         with:
           node-version: 24
 
-      - name: 3. 깃허브 공장에서 빌드만 수행 (패키징 안 함)
+      - name: 3. 깃허브 공장에서 무거운 모듈 설치 및 빌드 전부 수행
         run: |
-          npm install
+          # 깃허브의 강력한 CPU/RAM을 써서 무거운 설치를 여기서 다 끝냅니다.
+          npm ci --omit=dev
           npx prisma generate
           npm run build
+          
+          # 만들어진 결과물과 무거운 node_modules까지 전부 하나의 파일로 압축합니다!
+          tar -czvf backend-deploy.tar.gz dist node_modules package.json package-lock.json prisma
 
-      - name: 4. 필수 파일(코드 파일)만 내 서버로 초고속 배달
+      - name: 4. 내 서버로 압축 완료된 단 1개의 파일만 초고속 배달
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-          source: "dist,package.json,package-lock.json,prisma"
-          target: "~/reviewApp-backend"
+          source: "backend-deploy.tar.gz"
+          target: "~/"
 
-      - name: 5. 내 서버에 접속해서 초경량 모듈 설치 및 PM2 켜기
+      - name: 5. 내 서버 접속 후 압축 풀고 PM2만 바로 켜기 (초경량 작업)
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
@@ -42,22 +46,20 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
+            # 기존 폴더로 이동 및 없으면 생성
+            mkdir -p ~/reviewApp-backend
+            
+            # 방금 배달온 압축 파일을 서버 폴더에 풀기
+            tar -xzvf ~/backend-deploy.tar.gz -C ~/reviewApp-backend
+            
             cd ~/reviewApp-backend
             
-            # CI 환경임을 명시하여 각종 (Y/N) 질문이나 진행 상태바 표출을 모두 스킵 (타임아웃 방지)
-            export CI=true
-            
-            # 불필요한 audit/fund 검사를 생략해 메모리 부하와 속도를 대폭 개선합니다.
-            npm ci --omit=dev --no-audit --no-fund
-            
-            # 서버용 Prisma 엔진 생성 (혹시 모를 Y/N 질문은 --yes로 강제 돌파)
-            npx --yes prisma generate
-            
-            # 기존 고스트 프로세스 삭제
+            # 고스트 프로세스 삭제 후 바로 실행 (npm install 전혀 안 함!)
             pm2 delete backend-app || true
-            
-            # 바로 서비스 시작
             pm2 start npm --name "backend-app" -- run start
             
             pm2 save
             pm2 list
+            
+            # 남은 압축 파일 청소
+            rm ~/backend-deploy.tar.gz
