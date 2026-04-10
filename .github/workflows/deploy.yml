@@ -18,48 +18,45 @@ jobs:
         with:
           node-version: 24
 
-      - name: 3. 깃허브 공장에서 무거운 모듈 설치 및 빌드 전부 수행
+      - name: 3. 깃허브 공장에서 빌드만 수행 (패키징 안 함)
         run: |
-          # 깃허브의 강력한 CPU/RAM을 써서 무거운 설치를 여기서 다 끝냅니다.
-          npm ci --omit=dev
+          npm install
           npx prisma generate
           npm run build
-          
-          # 만들어진 결과물과 무거운 node_modules까지 전부 하나의 파일로 압축합니다!
-          tar -czvf backend-deploy.tar.gz dist node_modules package.json package-lock.json prisma
 
-      - name: 4. 내 서버로 압축 완료된 단 1개의 파일만 초고속 배달
+      - name: 4. 필수 파일(코드 파일)만 내 서버로 초고속 배달
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-          source: "backend-deploy.tar.gz"
-          target: "~/"
+          source: "dist,package.json,package-lock.json,prisma"
+          target: "~/reviewApp-backend"
 
-      - name: 5. 내 서버 접속 후 압축 풀고 PM2만 바로 켜기 (초경량 작업)
+      - name: 5. 내 서버에 접속해서 의존성 설치 및 PM2 켜기
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
+          # 💡 중요: iwinv 서버에서 설치가 오래 걸려도 튕기지 않게 타임아웃을 30분으로 대폭 늘립니다.
+          command_timeout: 30m
           script: |
-            # 기존 폴더로 이동 및 없으면 생성
-            mkdir -p ~/reviewApp-backend
-            
-            # 방금 배달온 압축 파일을 서버 폴더에 풀기
-            tar -xzvf ~/backend-deploy.tar.gz -C ~/reviewApp-backend
-            
+            export CI=true
             cd ~/reviewApp-backend
             
-            # 고스트 프로세스 삭제 후 바로 실행 (npm install 전혀 안 함!)
+            # 서버 사양이 낮아 오래 걸리더라도 30분 안에는 반드시 돌파합니다.
+            npm install --omit=dev --no-audit --no-fund
+            
+            # (Y/N) 대기 방지
+            npx --yes prisma generate
+            
             pm2 delete backend-app || true
-            pm2 start npm --name "backend-app" -- run start
+            
+            # npm run start 대신 내장된 server.js 직접 구동으로 안정성을 높입니다.
+            pm2 start dist/server.js --name "backend-app"
             
             pm2 save
             pm2 list
-            
-            # 남은 압축 파일 청소
-            rm ~/backend-deploy.tar.gz
