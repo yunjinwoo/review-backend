@@ -5,57 +5,39 @@ on:
     branches: [ main ] 
 
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - name: 1. 코드를 깃허브 공장으로 가져오기 (Checkout)
-        uses: actions/checkout@v4
-
-      - name: 2. 깃허브 공장에 Node.js 24버전 설치
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: 3. 깃허브 공장에서 빌드만 수행 (패키징 안 함)
-        run: |
-          npm install
-          npx prisma generate
-          npm run build
-
-      - name: 4. 필수 파일(코드 파일)만 내 서버로 초고속 배달
-        uses: appleboy/scp-action@master
-        with:
-          host: ${{ secrets.SERVER_IP }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          port: 22
-          source: "dist,package.json,package-lock.json,prisma"
-          target: "~/reviewApp-backend"
-
-      - name: 5. 내 서버에 접속해서 의존성 설치 및 PM2 켜기
+      - name: 서버 접속 및 Git Pull 배포
         uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SERVER_IP }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-          # 💡 중요: iwinv 서버에서 설치가 오래 걸려도 튕기지 않게 타임아웃을 30분으로 대폭 늘립니다.
+          # 서버 설치 및 빌드 시간을 고려해 30분 타임아웃 유지
           command_timeout: 30m
           script: |
             export CI=true
+            
+            # 1. 프로젝트 폴더로 이동
             cd ~/reviewApp-backend
             
-            # 서버 사양이 낮아 오래 걸리더라도 30분 안에는 반드시 돌파합니다.
-            npm install --omit=dev --no-audit --no-fund
+            # 2. 최신 코드를 깃허브에서 직접 당겨오기 (Pull)
+            # ※ 주의: 서버에 미리 git clone이 되어 있고, SSH Key 권한이 있어야 합니다.
+            git pull origin main
             
-            # (Y/N) 대기 방지
+            # 3. 의존성 설치 및 생성
+            npm install --no-audit --no-fund
             npx --yes prisma generate
             
-            pm2 delete backend-app || true
+            # 4. 서버 현지 빌드 수행
+            npm run build
             
-            # npm run start 대신 내장된 server.js 직접 구동으로 안정성을 높입니다.
+            # 5. PM2 앱 재시작
+            pm2 delete backend-app || true
             pm2 start dist/server.js --name "backend-app"
             
             pm2 save

@@ -3,3 +3,4 @@
 /src/generated/prisma
 prisma/dev.db
 .vscode/settings.json
+dist/server.js
