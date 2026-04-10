@@ -18,7 +18,6 @@ jobs:
 
       - name: 3. 깃허브 공장에서 의존성 설치 및 백엔드 초고속 압축(esbuild)
         run: |
-          cd review-backend
           npm install
           npx prisma generate
           npm run build
@@ -30,7 +29,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
-          source: "review-backend/dist,review-backend/package.json,review-backend/prisma"
+          source: "dist,package.json,prisma"
           target: "~/reviewApp-backend"
 
       - name: 5. 내 서버에 접속해서 PM2 켜기 (초경량 작업)
@@ -41,7 +40,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           port: 22
           script: |
-            cd ~/reviewApp-backend/review-backend
+            cd ~/reviewApp-backend
             
             # 무거운 devDependencies(타입스크립트 등)를 제외한 실 구동용 패키지만 빠르게 설치
             npm install --omit=dev
