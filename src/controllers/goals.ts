@@ -115,3 +115,77 @@ export const markLog = async (req: Request, res: Response) => {
     serverError(res, e);
   }
 };
+
+// ---- 날짜별 할 일 ----
+
+function parseTodoBody(body: any): goals.TodoInput | string {
+  const title = typeof body?.title === 'string' ? body.title.trim() : '';
+  const date = String(body?.date ?? '');
+  const done = body?.done === true;
+  const goalId = body?.goalId == null ? null : parseId(body.goalId);
+  if (!title || title.length > 100) return 'title은 1~100자여야 합니다.';
+  if (!DATE_RE.test(date)) return 'date는 yyyy-MM-dd 형식이어야 합니다.';
+  if (body?.goalId != null && goalId == null) return 'goalId가 잘못됐습니다.';
+  return { title, date, done, goalId };
+}
+
+async function validTodo(res: Response, body: unknown): Promise<goals.TodoInput | null> {
+  const t = parseTodoBody(body);
+  if (typeof t === 'string') {
+    fail(res, 400, t);
+    return null;
+  }
+  if (t.goalId != null && !(await goals.goalExists(t.goalId))) {
+    fail(res, 404, '연결한 목표를 찾을 수 없습니다.');
+    return null;
+  }
+  return t;
+}
+
+export const getTodos = async (req: Request, res: Response) => {
+  try {
+    const from = String(req.query.from ?? '');
+    const to = String(req.query.to ?? '');
+    if (!DATE_RE.test(from) || !DATE_RE.test(to)) {
+      return fail(res, 400, 'from, to는 yyyy-MM-dd 형식이어야 합니다.');
+    }
+    res.json(await goals.listTodos(from, to));
+  } catch (e) {
+    serverError(res, e);
+  }
+};
+
+export const postTodo = async (req: Request, res: Response) => {
+  try {
+    const t = await validTodo(res, req.body);
+    if (!t) return;
+    res.status(201).json(await goals.createTodo(t));
+  } catch (e) {
+    serverError(res, e);
+  }
+};
+
+export const putTodo = async (req: Request, res: Response) => {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) return fail(res, 400, 'id가 잘못됐습니다.');
+    const t = await validTodo(res, req.body);
+    if (!t) return;
+    const updated = await goals.updateTodo(id, t);
+    if (!updated) return fail(res, 404, '할 일을 찾을 수 없습니다.');
+    res.json(updated);
+  } catch (e) {
+    serverError(res, e);
+  }
+};
+
+export const removeTodo = async (req: Request, res: Response) => {
+  try {
+    const id = parseId(req.params.id);
+    if (!id) return fail(res, 400, 'id가 잘못됐습니다.');
+    await goals.deleteTodo(id);
+    res.status(204).end();
+  } catch (e) {
+    serverError(res, e);
+  }
+};
