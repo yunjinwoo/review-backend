@@ -54,6 +54,17 @@ export function ensureGoalTables(): Promise<void> {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         PRIMARY KEY (goal_id, date)
       )`);
+    // 날짜별 할 일 (예: "토 북한산 등산"). goal_id가 있으면 완료할 때 그 목표도 체크된다.
+    await prisma.$executeRawUnsafe(`
+      CREATE TABLE IF NOT EXISTS todos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        date TEXT NOT NULL,
+        title TEXT NOT NULL,
+        done INTEGER NOT NULL DEFAULT 0,
+        goal_id INTEGER,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      )`);
+    await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS todos_date ON todos(date)`);
     const rows = await prisma.$queryRaw<{ n: number | bigint }[]>`SELECT COUNT(*) AS n FROM goals`;
     if (Number(rows[0]?.n ?? 0) === 0) {
       for (const g of DEFAULT_GOALS) {
@@ -105,11 +116,12 @@ export async function updateGoal(id: number, g: Omit<Goal, 'id'>): Promise<Goal 
   return rows[0] ? toGoal(rows[0]) : null;
 }
 
-/** 목표와 그 목표의 체크 기록을 함께 지운다 */
+/** 목표와 그 목표의 체크 기록을 함께 지운다. 그 목표에 연결된 할 일은 연결만 끊는다. */
 export async function deleteGoal(id: number): Promise<void> {
   await ensureGoalTables();
   await prisma.$transaction([
     prisma.$executeRaw`DELETE FROM goal_logs WHERE goal_id = ${id}`,
+    prisma.$executeRaw`UPDATE todos SET goal_id = NULL WHERE goal_id = ${id}`, // 할 일은 남기고 연결만 끊음
     prisma.$executeRaw`DELETE FROM goals WHERE id = ${id}`,
   ]);
 }
@@ -153,4 +165,70 @@ export async function goalExists(id: number): Promise<boolean> {
   await ensureGoalTables();
   const rows = await prisma.$queryRaw<{ id: unknown }[]>`SELECT id FROM goals WHERE id = ${id}`;
   return rows.length > 0;
+}
+
+// ---- 날짜별 할 일 ----
+
+export interface Todo {
+  id: number;
+  date: string; // yyyy-MM-dd
+  title: string;
+  done: boolean;
+  goalId: number | null;
+}
+
+export type TodoInput = Omit<Todo, 'id'>;
+
+type TodoRow = { id: unknown; date: string; title: string; done: unknown; goal_id: unknown };
+const toTodo = (r: TodoRow): Todo => ({
+  id: Number(r.id),
+  date: r.date,
+  title: r.title,
+  done: Number(r.done) === 1,
+  goalId: r.goal_id == null ? null : Number(r.goal_id),
+});
+
+export async function listTodos(from: string, to: string): Promise<Todo[]> {
+  await ensureGoalTables();
+  const rows = await prisma.$queryRaw<TodoRow[]>`
+    SELECT id, date, title, done, goal_id FROM todos
+    WHERE date >= ${from} AND date <= ${to}
+    ORDER BY date, id`;
+  return rows.map(toTodo);
+}
+
+/** 완료된 할 일에 목표가 연결돼 있으면 그날 그 목표도 체크한다 (이미 체크돼 있으면 그대로) */
+async function checkLinkedGoal(t: Todo): Promise<void> {
+  if (!t.done || t.goalId == null) return;
+  await prisma.$executeRaw`
+    INSERT OR IGNORE INTO goal_logs (goal_id, date, source) VALUES (${t.goalId}, ${t.date}, 'manual')`;
+}
+
+export async function createTodo(t: TodoInput): Promise<Todo> {
+  await ensureGoalTables();
+  const rows = await prisma.$queryRaw<TodoRow[]>`
+    INSERT INTO todos (date, title, done, goal_id)
+    VALUES (${t.date}, ${t.title}, ${t.done ? 1 : 0}, ${t.goalId})
+    RETURNING id, date, title, done, goal_id`;
+  const todo = toTodo(rows[0]!);
+  await checkLinkedGoal(todo);
+  return todo;
+}
+
+/** 없는 id면 null */
+export async function updateTodo(id: number, t: TodoInput): Promise<Todo | null> {
+  await ensureGoalTables();
+  const rows = await prisma.$queryRaw<TodoRow[]>`
+    UPDATE todos SET date = ${t.date}, title = ${t.title}, done = ${t.done ? 1 : 0}, goal_id = ${t.goalId}
+    WHERE id = ${id}
+    RETURNING id, date, title, done, goal_id`;
+  if (!rows[0]) return null;
+  const todo = toTodo(rows[0]);
+  await checkLinkedGoal(todo);
+  return todo;
+}
+
+export async function deleteTodo(id: number): Promise<void> {
+  await ensureGoalTables();
+  await prisma.$executeRaw`DELETE FROM todos WHERE id = ${id}`;
 }
