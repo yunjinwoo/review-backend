@@ -4,6 +4,7 @@ import cors from 'cors';
 import reviewRoutes from './routes/review.js';
 import goalRoutes from './routes/goals.js';
 import calendarRoutes from './routes/calendar.js';
+import planRoutes from './routes/plans.js';
 import { ensureGoalTables } from './services/goals.js';
 
 const app = express();
@@ -16,6 +17,7 @@ app.use(express.json());
 app.use('/api', reviewRoutes);
 app.use('/api', goalRoutes); // 주간 운동 목표 (gemini_flutter /#/goals)
 app.use('/api', calendarRoutes); // 다른 달력 구독용 .ics
+app.use('/api', planRoutes); // 기간 계획 타임라인 (gemini_flutter /#/plans)
 
 // 목표 테이블을 미리 만들어 둔다. 실패해도 리뷰 기능은 그대로 돌아가고, 목표 API 첫 요청에서 다시 시도한다.
 ensureGoalTables().catch((e) => console.error('[goals] 테이블 준비 실패:', e));
