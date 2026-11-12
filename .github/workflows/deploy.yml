@@ -70,4 +70,6 @@ jobs:
             echo
             curl -fsS http://localhost:5050/api/goals
             echo
+            curl -fsS http://localhost:5050/api/plans
+            echo
             pm2 list
