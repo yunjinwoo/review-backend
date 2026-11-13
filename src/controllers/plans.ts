@@ -45,13 +45,17 @@ function parseItemBody(body: any): Omit<plans.PlanItemInput, 'planId'> | string 
   const date = String(body?.date ?? '');
   const start = String(body?.start ?? '');
   const end = body?.end == null || body.end === '' ? null : String(body.end);
+  const tagRaw = typeof body?.tag === 'string' ? body.tag.trim() : '';
+  const tag = tagRaw === '' ? null : tagRaw;
   const done = body?.done === true;
-  if (!title || title.length > 60) return 'title은 1~60자여야 합니다.';
+  // 제목은 비워도 된다 (시작 시각만으로 등록)
+  if (title.length > 60) return 'title은 60자 이하여야 합니다.';
+  if (tag != null && tag.length > 20) return 'tag는 20자 이하여야 합니다.';
   if (!validDate(date)) return 'date는 yyyy-MM-dd 형식이어야 합니다.';
   if (!TIME_RE.test(start)) return 'start는 HH:mm 형식이어야 합니다.';
   if (end != null && !TIME_RE.test(end)) return 'end는 HH:mm 형식이어야 합니다.';
   if (end != null && end <= start) return '끝 시각은 시작 시각보다 늦어야 합니다.';
-  return { title, date, start, end, done };
+  return { title, tag, date, start, end, done };
 }
 
 export const getPlans = async (_req: Request, res: Response) => {
@@ -155,6 +159,14 @@ export const removeItem = async (req: Request, res: Response) => {
     if (!id) return fail(res, 400, 'id가 잘못됐습니다.');
     await plans.deleteItem(id);
     res.status(204).end();
+  } catch (e) {
+    serverError(res, e);
+  }
+};
+
+export const getTags = async (_req: Request, res: Response) => {
+  try {
+    res.json(await plans.listTags());
   } catch (e) {
     serverError(res, e);
   }

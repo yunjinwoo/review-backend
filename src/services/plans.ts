@@ -29,7 +29,8 @@ export interface PlanItem {
   date: string; // yyyy-MM-dd
   start: string; // HH:mm
   end: string | null; // HH:mm. null이면 "9시 기상"처럼 시각 하나짜리
-  title: string;
+  title: string; // 비어 있을 수 있다 (시각만 찍어 두는 일정)
+  tag: string | null; // "등산"처럼 자주 쓰는 분류. 화면에서 칩으로 골라 빠르게 등록한다
   done: boolean;
 }
 
@@ -60,6 +61,11 @@ export function ensurePlanTables(): Promise<void> {
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`);
     await prisma.$executeRawUnsafe(`CREATE INDEX IF NOT EXISTS plan_items_plan ON plan_items(plan_id, date)`);
+    // 태그 칸은 나중에 추가됐다. 이미 만들어진 테이블에는 없으므로 없을 때만 붙인다.
+    const cols = await prisma.$queryRawUnsafe<{ name: string }[]>(`PRAGMA table_info(plan_items)`);
+    if (!cols.some((c) => c.name === 'tag')) {
+      await prisma.$executeRawUnsafe(`ALTER TABLE plan_items ADD COLUMN tag TEXT`);
+    }
   })().catch((e) => {
     ready = null; // 다음 요청에서 다시 시도
     throw e;
@@ -80,7 +86,7 @@ const toPlan = (r: PlanRow): Plan => ({
 
 type ItemRow = {
   id: unknown; plan_id: unknown; date: string; start_time: string;
-  end_time: string | null; title: string; done: unknown;
+  end_time: string | null; title: string; tag: string | null; done: unknown;
 };
 const toItem = (r: ItemRow): PlanItem => ({
   id: Number(r.id),
@@ -89,6 +95,7 @@ const toItem = (r: ItemRow): PlanItem => ({
   start: r.start_time,
   end: r.end_time,
   title: r.title,
+  tag: r.tag ?? null,
   done: Number(r.done) === 1,
 });
 
@@ -118,7 +125,7 @@ export async function getPlan(id: number): Promise<Plan | null> {
 export async function listItems(planId: number): Promise<PlanItem[]> {
   await ensurePlanTables();
   const rows = await prisma.$queryRaw<ItemRow[]>`
-    SELECT id, plan_id, date, start_time, end_time, title, done FROM plan_items
+    SELECT id, plan_id, date, start_time, end_time, title, tag, done FROM plan_items
     WHERE plan_id = ${planId}
     ORDER BY date, start_time, id`;
   return rows.map(toItem);
@@ -164,16 +171,16 @@ export async function deletePlan(id: number): Promise<void> {
 export async function createItem(i: PlanItemInput): Promise<PlanItem> {
   await ensurePlanTables();
   const rows = await prisma.$queryRaw<ItemRow[]>`
-    INSERT INTO plan_items (plan_id, date, start_time, end_time, title, done)
-    VALUES (${i.planId}, ${i.date}, ${i.start}, ${i.end}, ${i.title}, ${i.done ? 1 : 0})
-    RETURNING id, plan_id, date, start_time, end_time, title, done`;
+    INSERT INTO plan_items (plan_id, date, start_time, end_time, title, tag, done)
+    VALUES (${i.planId}, ${i.date}, ${i.start}, ${i.end}, ${i.title}, ${i.tag}, ${i.done ? 1 : 0})
+    RETURNING id, plan_id, date, start_time, end_time, title, tag, done`;
   return toItem(rows[0]!);
 }
 
 export async function getItem(id: number): Promise<PlanItem | null> {
   await ensurePlanTables();
   const rows = await prisma.$queryRaw<ItemRow[]>`
-    SELECT id, plan_id, date, start_time, end_time, title, done FROM plan_items WHERE id = ${id}`;
+    SELECT id, plan_id, date, start_time, end_time, title, tag, done FROM plan_items WHERE id = ${id}`;
   return rows[0] ? toItem(rows[0]) : null;
 }
 
@@ -182,13 +189,25 @@ export async function updateItem(id: number, i: Omit<PlanItemInput, 'planId'>): 
   await ensurePlanTables();
   const rows = await prisma.$queryRaw<ItemRow[]>`
     UPDATE plan_items SET date = ${i.date}, start_time = ${i.start}, end_time = ${i.end},
-      title = ${i.title}, done = ${i.done ? 1 : 0}
+      title = ${i.title}, tag = ${i.tag}, done = ${i.done ? 1 : 0}
     WHERE id = ${id}
-    RETURNING id, plan_id, date, start_time, end_time, title, done`;
+    RETURNING id, plan_id, date, start_time, end_time, title, tag, done`;
   return rows[0] ? toItem(rows[0]) : null;
 }
 
 export async function deleteItem(id: number): Promise<void> {
   await ensurePlanTables();
   await prisma.$executeRaw`DELETE FROM plan_items WHERE id = ${id}`;
+}
+
+/** 지금까지 쓴 태그를 많이 쓴 순서로. 일정 추가 창의 칩에 쓴다. */
+export async function listTags(): Promise<string[]> {
+  await ensurePlanTables();
+  const rows = await prisma.$queryRaw<{ tag: string }[]>`
+    SELECT tag FROM plan_items
+    WHERE tag IS NOT NULL AND tag <> ''
+    GROUP BY tag
+    ORDER BY COUNT(*) DESC, MAX(id) DESC
+    LIMIT 30`;
+  return rows.map((r) => r.tag);
 }
