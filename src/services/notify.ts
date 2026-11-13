@@ -7,6 +7,8 @@
 //   NOTIFY_TZ           (선택) 일정 시각의 시간대. 기본 Asia/Seoul
 //   TELEGRAM_API_BASE   (선택) 테스트용 가짜 서버 주소. 기본 https://api.telegram.org
 
+import http from 'node:http';
+import https from 'node:https';
 import { PrismaClient } from '@prisma/client';
 import { ensurePlanTables } from './plans.js';
 
@@ -78,24 +80,68 @@ class TelegramError extends Error {
   }
 }
 
-async function tg<T = any>(method: string, body: Record<string, unknown> = {}, timeoutMs = 10_000): Promise<T> {
+/** 마지막으로 텔레그램 호출이 실패한 이유. 상태 API로 보여 줘서 서버 로그 없이도 원인을 알 수 있게 한다. */
+let lastError: { at: string; message: string } | null = null;
+
+// Node의 fetch는 IPv6와 IPv4를 번갈아 시도하면서 한 번에 250ms만 기다린다.
+// 한국 서버에서 텔레그램까지는 연결에 그보다 오래 걸릴 때가 있어 "fetch failed"로 자주 끊겼다.
+// 그래서 https 모듈로 IPv4만 쓰고, 연결을 재사용(keep-alive)하고, 넉넉히 기다린다.
+const agentOptions = { keepAlive: true, family: 4 as const };
+const httpsAgent = new https.Agent(agentOptions);
+const httpAgent = new http.Agent(agentOptions);
+
+function postJson(url: URL, payload: string, timeoutMs: number): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const isHttps = url.protocol === 'https:';
+    const req = (isHttps ? https : http).request(
+      url,
+      {
+        method: 'POST',
+        agent: isHttps ? httpsAgent : httpAgent,
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on('data', (c: Buffer) => chunks.push(c));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
+        res.on('error', reject);
+      },
+    );
+    req.setTimeout(timeoutMs, () => req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' })));
+    req.on('error', reject);
+    req.end(payload);
+  });
+}
+
+async function tg<T = any>(method: string, body: Record<string, unknown> = {}, timeoutMs = 15_000): Promise<T> {
   if (!TOKEN) throw new TelegramError('TELEGRAM_BOT_TOKEN이 설정되지 않았습니다.');
-  let res: Response;
+  let res: { status: number; body: string };
   try {
-    res = await fetch(`${API_BASE}/bot${TOKEN}/${method}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    res = await postJson(new URL(`${API_BASE}/bot${TOKEN}/${method}`), JSON.stringify(body), timeoutMs);
   } catch (e) {
-    // 오류 메시지에 토큰이 들어간 주소가 섞이지 않게 원인만 남긴다
-    throw new TelegramError(`텔레그램 서버에 연결하지 못했습니다 (${e instanceof Error ? e.name : 'error'}).`);
+    // 오류 메시지에 토큰이 들어간 주소가 섞이지 않게 원인 코드만 남긴다 (ETIMEDOUT, ECONNRESET, ENOTFOUND 등)
+    const code = (e as NodeJS.ErrnoException)?.code ?? (e instanceof Error ? e.name : 'error');
+    const err = new TelegramError(`텔레그램 서버에 연결하지 못했습니다 (${code}).`);
+    lastError = { at: new Date().toISOString(), message: `${method}: ${err.message}` };
+    throw err;
   }
-  const json = (await res.json().catch(() => null)) as { ok?: boolean; result?: T; description?: string } | null;
-  if (!json?.ok) throw new TelegramError(json?.description ?? `텔레그램 응답 ${res.status}`, res.status);
+  let json: { ok?: boolean; result?: T; description?: string } | null = null;
+  try {
+    json = JSON.parse(res.body);
+  } catch {
+    json = null;
+  }
+  if (!json?.ok) {
+    const err = new TelegramError(json?.description ?? `텔레그램 응답 ${res.status}`, res.status);
+    lastError = { at: new Date().toISOString(), message: `${method}: ${err.message}` };
+    throw err;
+  }
+  if (method === 'getUpdates') lastPollOkAt = new Date().toISOString();
   return json.result as T;
 }
+
+/** 봇이 받는 메시지를 마지막으로 정상 확인한 시각. 이게 비어 있거나 오래됐으면 /start 를 받을 수 없는 상태다. */
+let lastPollOkAt: string | null = null;
 
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
@@ -118,10 +164,14 @@ export interface NotifyStatus {
   connected: boolean; // 받을 대화가 등록됐는지
   botUsername: string | null; // t.me/<이름> 링크를 만들 때 쓴다
   error: string | null; // 토큰이 틀렸을 때 등
+  lastPollOkAt: string | null; // 봇이 받는 메시지를 마지막으로 정상 확인한 시각 (ISO)
+  lastError: { at: string; message: string } | null; // 마지막 텔레그램 호출 실패
 }
 
 export async function getStatus(): Promise<NotifyStatus> {
-  if (!TOKEN) return { configured: false, connected: false, botUsername: null, error: null };
+  if (!TOKEN) {
+    return { configured: false, connected: false, botUsername: null, error: null, lastPollOkAt: null, lastError: null };
+  }
   let error: string | null = null;
   let username: string | null = null;
   try {
@@ -129,7 +179,10 @@ export async function getStatus(): Promise<NotifyStatus> {
   } catch (e) {
     error = e instanceof Error ? e.message : String(e);
   }
-  return { configured: true, connected: (await getChatId()) != null, botUsername: username, error };
+  return {
+    configured: true, connected: (await getChatId()) != null, botUsername: username, error,
+    lastPollOkAt, lastError,
+  };
 }
 
 /** 등록된 대화로 테스트 메시지를 보낸다. 보낼 수 없으면 이유를 던진다. */
@@ -286,7 +339,7 @@ async function pollLoop(): Promise<void> {
       const updates = await tg<any[]>(
         'getUpdates',
         { offset, timeout: 25, allowed_updates: ['message', 'callback_query'] },
-        35_000,
+        40_000,
       );
       for (const u of updates) {
         offset = Math.max(offset, Number(u.update_id) + 1);
