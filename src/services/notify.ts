@@ -11,6 +11,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { PrismaClient } from '@prisma/client';
 import { ensurePlanTables } from './plans.js';
+import { alertTick, monthText, summaryText } from './alerts.js';
 
 const dbUrl = process.env.DATABASE_URL && process.env.DATABASE_URL !== 'undefined'
   ? process.env.DATABASE_URL.replace(/"/g, '')
@@ -143,7 +144,7 @@ async function tg<T = any>(method: string, body: Record<string, unknown> = {}, t
 /** 봇이 받는 메시지를 마지막으로 정상 확인한 시각. 이게 비어 있거나 오래됐으면 /start 를 받을 수 없는 상태다. */
 let lastPollOkAt: string | null = null;
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+export const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 const sendMessage = (chatId: string, text: string, extra: Record<string, unknown> = {}) =>
   tg('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', ...extra });
@@ -155,6 +156,19 @@ async function getBotUsername(): Promise<string | null> {
   const me = await tg<{ username?: string }>('getMe');
   botUsername = me.username ?? null;
   return botUsername;
+}
+
+/** 받는 대화가 연결돼 있는지 (알림 기능들이 확인용으로 쓴다) */
+export async function hasChat(): Promise<boolean> {
+  return TOKEN !== '' && (await getChatId()) != null;
+}
+
+/** 연결된 대화로 메시지를 보낸다. 연결이 없으면 보내지 않고 false. (alerts.ts가 쓴다) */
+export async function sendToChat(text: string, extra: Record<string, unknown> = {}): Promise<boolean> {
+  const chatId = await getChatId();
+  if (!chatId) return false;
+  await sendMessage(chatId, text, extra);
+  return true;
 }
 
 // ---- 상태 / 테스트 (화면에서 사용) ----
@@ -195,7 +209,7 @@ export async function sendTest(): Promise<void> {
 // ---- 일정 시각 확인 ----
 
 /** 일정이 저장된 시간대(기본 한국)의 지금 날짜와 시각 */
-function nowLocal(at = new Date()): { date: string; time: string } {
+export function nowLocal(at = new Date()): { date: string; time: string } {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone: TZ, year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
@@ -297,10 +311,15 @@ async function handleMessage(msg: any): Promise<void> {
     if (!registered) await setChatId(chatId);
     await sendMessage(
       chatId,
-      '연결됐어요. 타임라인 일정의 시작 시각이 되면 여기로 알려 드릴게요.\n/today 를 보내면 오늘 일정을 볼 수 있어요.',
+      '연결됐어요. 일정 시작 시각, 정해 둔 날짜 알림, 목표 상황을 여기로 알려 드릴게요.\n'
+        + '/today 오늘 일정 · /month 이번 달 목표 · /week 주간 요약',
     );
   } else if (command === '/today' && registered) {
     await sendMessage(chatId, await todayText());
+  } else if (command === '/month' && registered) {
+    await sendMessage(chatId, await monthText(nowLocal().date.slice(0, 7)));
+  } else if (command === '/week' && registered) {
+    await sendMessage(chatId, await summaryText(nowLocal().date));
   }
 }
 
@@ -370,7 +389,12 @@ export function startNotifier(): void {
     return;
   }
   console.log(`[notify] 텔레그램 일정 알림을 시작합니다 (시간대 ${TZ}).`);
-  setInterval(tick, TICK_MS).unref();
-  void tick();
+  // 일정 알림과 특정일·상황 알림(alerts.ts)을 같은 30초 타이머로 확인한다
+  const both = async () => {
+    await tick();
+    await alertTick().catch((e) => console.error('[alerts]', e instanceof Error ? e.message : e));
+  };
+  setInterval(both, TICK_MS).unref();
+  void both();
   void pollLoop();
 }
