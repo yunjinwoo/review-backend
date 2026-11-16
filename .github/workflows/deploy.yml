@@ -72,4 +72,6 @@ jobs:
             echo
             curl -fsS http://localhost:5050/api/plans
             echo
+            curl -fsS http://localhost:5050/api/alert-settings
+            echo
             pm2 list
