@@ -1,6 +1,10 @@
 import type { Request, Response } from 'express';
 import * as monthly from '../services/monthly.js';
 import { goalExists } from '../services/goals.js';
+import { markAchievedSilently } from '../services/alerts.js';
+
+/** 만들거나 고친 순간 이미 채워져 있는 목표는 "달성!" 알림 없이 넘어간다. 실패해도 저장은 그대로 둔다. */
+const quiet = () => markAchievedSilently().catch((e) => console.error('[monthly]', e));
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -50,7 +54,9 @@ export const postMonthly = async (req: Request, res: Response) => {
   try {
     const g = await parseBody(req.body);
     if (typeof g === 'string') return fail(res, 400, g);
-    res.status(201).json(await monthly.createMonthly(g));
+    const created = await monthly.createMonthly(g);
+    await quiet();
+    res.status(201).json(created);
   } catch (e) {
     serverError(res, e);
   }
@@ -64,6 +70,8 @@ export const putMonthly = async (req: Request, res: Response) => {
     if (typeof g === 'string') return fail(res, 400, g);
     const updated = await monthly.updateMonthly(id, g);
     if (!updated) return fail(res, 404, '월별 목표를 찾을 수 없습니다.');
+    // 직접 체크 목표는 체크하는 것이 곧 달성이라 알림을 보낸다. 횟수 목표는 횟수·대상을 고쳐서 채워진 것이면 조용히 넘어간다.
+    if (updated.kind === 'count') await quiet();
     res.json(updated);
   } catch (e) {
     serverError(res, e);

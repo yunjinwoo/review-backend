@@ -2,7 +2,7 @@
 //
 // 1) 특정일 알림 (reminders 테이블): 날짜 + 시각 + 메모. 그 시각이 되면 보낸다.
 // 2) 상황 알림: 하루 한 번 "점검 시각"(기본 20:00)에 살펴보고, 해당하면 보낸다.
-//    - 주간 목표 밀림: 주 중반(기본 수요일)에 아직 못 채운 주간 목표가 있을 때
+//    - 주간 목표 밀림: 주 중반(기본 수요일)에 지나간 날 수에 비해 뒤처진 주간 목표가 있을 때
 //    - 월 목표 부족: 월말 N일 전(기본 7일)에 아직 못 채운 월별 목표가 있을 때
 //    - 운동 공백: N일(기본 3일) 연속 아무 체크가 없을 때 (공백 한 번에 한 번만)
 // 3) 목표 달성: 주간 목표 하나를 채우면, 주간 목표를 다 채우면, 월별 목표를 채우면 바로 (30초 안에)
@@ -215,8 +215,19 @@ async function unclaim(key: string): Promise<void> {
 }
 
 /** 키가 처음일 때만 보낸다. 보내기에 실패하면 기록을 지워서 다음 확인 때 다시 시도한다. */
-async function sendOnce(key: string, text: () => Promise<string | null>): Promise<void> {
-  if (!(await claim(key))) return;
+/**
+ * 그날 저녁 기준으로 주간 목표가 뒤처졌는지.
+ * 지나간 날 수(오늘 포함)에 비례한 횟수를 못 채웠거나, 남은 날에 하루 한 번씩 해도 못 채우면 뒤처진 것으로 본다.
+ * 예) 수요일: 주 2회 목표는 0번이면 뒤처짐, 1번이면 정상. 주 1회 목표는 아직 뒤처진 게 아니다.
+ */
+export function isBehind(count: number, target: number, weekday: number): boolean {
+  const elapsed = weekday + 1; // 일요일=1일째
+  const daysLeft = 6 - weekday;
+  return count < Math.floor((target * elapsed) / 7) || target - count > daysLeft;
+}
+
+async function sendOnce(key: string, text: () => Promise<string | null>, silent = false): Promise<void> {
+  if (!(await claim(key)) || silent) return; // silent: 보내지 않고 알린 것으로만 적어 둔다
   try {
     const t = await text();
     if (t) await sendToChat(t);
@@ -273,9 +284,10 @@ async function checkWeeklyBehind(now: { date: string; time: string }, s: AlertSe
   if (!s.weeklyBehind || weekdayOf(now.date) !== s.weeklyBehindWeekday || !inWindow(now.time, s.checkTime)) return;
   const start = weekStartOf(now.date);
   await sendOnce(`weeklyBehind:${start}`, async () => {
-    const short = (await weekStats(start)).filter((g) => g.count < g.target);
+    const weekday = weekdayOf(now.date);
+    const short = (await weekStats(start)).filter((g) => isBehind(g.count, g.target, weekday));
     if (short.length === 0) return null;
-    const daysLeft = 6 - weekdayOf(now.date); // 오늘 밤 이후 토요일까지
+    const daysLeft = 6 - weekday; // 오늘 밤 이후 토요일까지
     return [
       `⚠️ <b>이번 주 목표가 밀렸어요</b> (남은 날 ${daysLeft}일)`,
       ...short.map((g) => `▫️ ${esc(g.name)} ${g.count}/${g.target} · ${g.target - g.count}번 더`),
@@ -314,26 +326,56 @@ async function checkIdle(now: { date: string; time: string }, s: AlertSettings):
     `💤 <b>${gap}일째 운동 기록이 없어요.</b> 마지막 기록은 ${md(last)}(${WEEKDAYS[weekdayOf(last)]})예요. 오늘 가볍게 움직여 볼까요?`);
 }
 
-async function checkAchieved(now: { date: string }, s: AlertSettings): Promise<void> {
-  if (!s.achieved) return;
+/**
+ * 채운 목표를 한 번씩 알린다. silent면 보내지 않고 "알린 것"으로만 적어 둔다.
+ * 달성 알림이 꺼져 있는 동안에도 silent로 적어 두기 때문에, 나중에 켰을 때 그동안 채운 것들이 한꺼번에 오지 않는다.
+ */
+async function checkAchieved(now: { date: string }, silent: boolean): Promise<void> {
   const start = weekStartOf(now.date);
   const stats = await weekStats(start);
   for (const g of stats) {
     if (g.count >= g.target) {
       await sendOnce(`achieved:week:${start}:${g.id}`, async () =>
-        `🎉 <b>${esc(g.name)}</b> 이번 주 목표 달성! (${g.count}/${g.target})`);
+        `🎉 <b>${esc(g.name)}</b> 이번 주 목표 달성! (${g.count}/${g.target})`, silent);
     }
   }
   if (stats.length > 0 && stats.every((g) => g.count >= g.target)) {
-    await sendOnce(`achieved:weekAll:${start}`, async () => `🏆 <b>이번 주 목표를 모두 채웠어요!</b>`);
+    await sendOnce(`achieved:weekAll:${start}`, async () => `🏆 <b>이번 주 목표를 모두 채웠어요!</b>`, silent);
   }
   const month = now.date.slice(0, 7);
   for (const g of await listMonthly(month)) {
     if (g.count >= g.target) {
       await sendOnce(`achieved:month:${month}:${g.id}`, async () =>
-        `🎉 이번 달 목표 달성: <b>${esc(g.name)}</b>${g.kind === 'count' ? ` (${g.count}/${g.target})` : ''}`);
+        `🎉 이번 달 목표 달성: <b>${esc(g.name)}</b>${g.kind === 'count' ? ` (${g.count}/${g.target})` : ''}`, silent);
     }
   }
+}
+
+/**
+ * 지금 채워져 있는 목표를 알림 없이 "알린 것"으로 적어 둔다.
+ * 목표를 새로 만들거나 횟수를 고쳐서 처음부터 채워진 상태가 됐을 때 부른다 (운동해서 채운 게 아니므로 "달성!"을 보내지 않는다).
+ */
+export async function markAchievedSilently(): Promise<void> {
+  await ensureAlertTables();
+  await checkAchieved(nowLocal(), true);
+}
+
+/** 봇의 /week: 이번 주(일~토) 지금까지의 진행과 이번 달 목표 */
+export async function weekText(today: string): Promise<string> {
+  const start = weekStartOf(today);
+  const stats = await weekStats(start);
+  const met = stats.filter((g) => g.count >= g.target).length;
+  const daysLeft = 6 - weekdayOf(today);
+  const lines = [
+    `📈 <b>이번 주</b> ${md(start)}~${md(addDays(start, 6))} · 오늘 빼고 남은 날 ${daysLeft}일`,
+    stats.length === 0
+      ? '주간 목표가 없어요.'
+      : `목표 ${met}/${stats.length}개 달성${met === stats.length ? ' 🏆' : ''}`,
+    ...stats.map((g) => `${g.count >= g.target ? '✅' : '▫️'} ${esc(g.name)} ${g.count}/${g.target}`),
+    '',
+    await monthText(today.slice(0, 7)),
+  ];
+  return lines.join('\n');
 }
 
 /** 주간 요약 글. 토요일에 보내면 이번 주, 다른 요일이면 지난 주(일~토)를 요약한다. */
@@ -380,7 +422,7 @@ export async function alertTick(): Promise<void> {
       ['주간 밀림', () => checkWeeklyBehind(now, s)],
       ['월 부족', () => checkMonthlyShort(now, s)],
       ['운동 공백', () => checkIdle(now, s)],
-      ['달성', () => checkAchieved(now, s)],
+      ['달성', () => checkAchieved(now, !s.achieved)],
       ['주간 요약', () => checkSummary(now, s)],
     ];
     for (const [name, step] of steps) {
