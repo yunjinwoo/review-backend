@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import * as goals from '../services/goals.js';
-import { deleteMonthlyForGoal } from '../services/monthly.js';
+import { deletePeriodGoalsForGoal } from '../services/periods.js';
 import { markAchievedSilently } from '../services/alerts.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -73,7 +73,7 @@ export const removeGoal = async (req: Request, res: Response) => {
     const id = parseId(req.params.id);
     if (!id) return fail(res, 400, 'id가 잘못됐습니다.');
     await goals.deleteGoal(id);
-    await deleteMonthlyForGoal(id); // 그 목표를 세던 월별 목표도 지운다
+    await deletePeriodGoalsForGoal(id); // 그 목표를 세던 기간 목표도 지운다
     res.status(204).end();
   } catch (e) {
     serverError(res, e);

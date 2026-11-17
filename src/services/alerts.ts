@@ -3,17 +3,20 @@
 // 1) 특정일 알림 (reminders 테이블): 날짜 + 시각 + 메모. 그 시각이 되면 보낸다.
 // 2) 상황 알림: 하루 한 번 "점검 시각"(기본 20:00)에 살펴보고, 해당하면 보낸다.
 //    - 주간 목표 밀림: 주 중반(기본 수요일)에 지나간 날 수에 비해 뒤처진 주간 목표가 있을 때
-//    - 월 목표 부족: 월말 N일 전(기본 7일)에 아직 못 채운 월별 목표가 있을 때
+//    - 기간 목표 부족: 기간(4주·5주)이 끝나기 N일 전(기본 7일)에 아직 못 채운 기간 목표가 있을 때
 //    - 운동 공백: N일(기본 3일) 연속 아무 체크가 없을 때 (공백 한 번에 한 번만)
-// 3) 목표 달성: 주간 목표 하나를 채우면, 주간 목표를 다 채우면, 월별 목표를 채우면 바로 (30초 안에)
-// 4) 주간 요약: 일요일(기본) 저녁(기본 21:00)에 지난 주 결과와 이번 달 진행
+// 3) 목표 달성: 주간 목표 하나를 채우면, 주간 목표를 다 채우면, 기간 목표를 채우면 바로 (30초 안에)
+// 4) 주간 요약: 일요일(기본) 저녁(기본 21:00)에 지난 주 결과와 기간 목표 진행
 //
 // 설정은 app_settings 테이블의 alert_settings(JSON)에 두고, 화면의 알림 설정 창에서 바꾼다.
 // 같은 알림을 두 번 보내지 않게 alert_log 테이블에 "무엇을 언제 보냈는지" 키를 남긴다.
 
 import { PrismaClient } from '@prisma/client';
 import { listGoals } from './goals.js';
-import { listMonthly, monthRange, ensureMonthlyTables, type MonthlyGoalProgress } from './monthly.js';
+import {
+  lookupPeriod, ensurePeriodTables, addDays, weekdayOf, weekStartOf, parseDay, daysBetween,
+  type PeriodGoalProgress, type PeriodWithGoals,
+} from './periods.js';
 import { esc, nowLocal, sendToChat, hasChat } from './notify.js';
 
 const dbUrl = process.env.DATABASE_URL && process.env.DATABASE_URL !== 'undefined'
@@ -31,7 +34,7 @@ let ready: Promise<void> | null = null;
 
 export function ensureAlertTables(): Promise<void> {
   ready ??= (async () => {
-    await ensureMonthlyTables();
+    await ensurePeriodTables();
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
@@ -52,6 +55,10 @@ export function ensureAlertTables(): Promise<void> {
         key TEXT PRIMARY KEY,
         sent_at TEXT NOT NULL DEFAULT (datetime('now'))
       )`);
+    // 달 단위였을 때 보낸 달성 알림 기록("achieved:month:2026-11:<id>")을 기간 단위 키로 옮겨서 같은 목표를 또 알리지 않게 한다
+    await prisma.$executeRawUnsafe(`
+      INSERT OR IGNORE INTO alert_log (key, sent_at)
+      SELECT 'achieved:period:' || substr(key, 24), sent_at FROM alert_log WHERE key LIKE 'achieved:month:_______:%'`);
   })().catch((e) => {
     ready = null;
     throw e;
@@ -66,7 +73,7 @@ export interface AlertSettings {
   weeklyBehind: boolean;
   weeklyBehindWeekday: number; // 0=일 ... 6=토
   monthlyShort: boolean;
-  monthlyShortDays: number; // 월말 며칠 전
+  monthlyShortDays: number; // 기간이 끝나기 며칠 전 (이름은 달 단위였을 때 그대로)
   idle: boolean;
   idleDays: number; // 며칠 연속 기록이 없으면
   achieved: boolean;
@@ -186,16 +193,9 @@ export async function deleteReminder(id: number): Promise<void> {
   await prisma.$executeRaw`DELETE FROM reminders WHERE id = ${id}`;
 }
 
-// ---- 날짜 도우미 (모두 'yyyy-MM-dd' 문자열, 주는 일요일 시작) ----
+// ---- 날짜 도우미 (날짜 계산은 periods.ts 것을 같이 쓴다) ----
 
-const parseDay = (d: string) => {
-  const [y, m, day] = d.split('-').map(Number) as [number, number, number];
-  return new Date(Date.UTC(y, m - 1, day));
-};
-const fmtDay = (d: Date) => d.toISOString().slice(0, 10);
-export const addDays = (d: string, n: number) => fmtDay(new Date(parseDay(d).getTime() + n * 86_400_000));
-export const weekdayOf = (d: string) => parseDay(d).getUTCDay(); // 0=일
-export const weekStartOf = (d: string) => addDays(d, -weekdayOf(d));
+export { addDays, weekdayOf, weekStartOf };
 const md = (d: string) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}`;
 const toMin = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
 
@@ -250,18 +250,32 @@ async function weekStats(start: string): Promise<WeekStat[]> {
   return goals.map((g) => ({ id: g.id, name: g.name, count: counts.get(g.id) ?? 0, target: g.timesPerWeek }));
 }
 
-const monthlyLine = (g: MonthlyGoalProgress) =>
+const goalLine = (g: PeriodGoalProgress) =>
   g.kind === 'check'
     ? `${g.done ? '✅' : '▫️'} ${esc(g.name)}`
     : `${g.count >= g.target ? '✅' : '▫️'} ${esc(g.name)} ${g.count}/${g.target}`;
 
-/** 봇의 /month 명령과 요약에서 쓰는 이번 달 진행 */
-export async function monthText(month: string): Promise<string> {
-  const goals = await listMonthly(month);
-  const title = `<b>${Number(month.slice(5, 7))}월 목표</b>`;
-  if (goals.length === 0) return `${title}\n아직 이번 달 목표가 없어요. 사이트 달력 위에서 추가할 수 있어요.`;
-  const met = goals.filter((g) => g.count >= g.target).length;
-  return [`${title} ${met}/${goals.length} 달성`, ...goals.map(monthlyLine)].join('\n');
+function periodLines(p: PeriodWithGoals, today: string, label: string): string[] {
+  const total = p.weeks * 7;
+  const ended = today > p.endDate;
+  const day = Math.min(total, daysBetween(p.startDate, today) + 1);
+  const title = `<b>${label}</b> ${md(p.startDate)}~${md(p.endDate)}`;
+  const time = ended
+    ? '끝난 기간'
+    : `${day}일째/${total}일 (${Math.round((day / total) * 100)}%) · 남은 날 ${total - day}일`;
+  if (p.goals.length === 0) return [`${title} · ${time}`, '아직 기간 목표가 없어요. 사이트 달력 위에서 추가할 수 있어요.'];
+  const met = p.goals.filter((g) => g.count >= g.target).length;
+  return [`${title} · ${time}`, `목표 ${met}/${p.goals.length}개 달성`, ...p.goals.map(goalLine)];
+}
+
+/** 봇의 /period 명령과 요약에서 쓰는 기간 목표 진행. 진행 중인 기간이 없으면 마지막으로 끝난 기간의 결과를 보여 준다. */
+export async function periodText(today: string): Promise<string> {
+  const { period, previous } = await lookupPeriod(today);
+  if (period) return periodLines(period, today, `${period.weeks}주 목표`).join('\n');
+  const hint = '진행 중인 기간 목표가 없어요. 사이트 달력 위에서 새 기간을 시작할 수 있어요.';
+  if (!previous) return hint;
+  const last = (await lookupPeriod(previous.endDate)).period;
+  return last ? [...periodLines(last, today, `지난 ${last.weeks}주 목표`), '', hint].join('\n') : hint;
 }
 
 // ---- 하나씩 확인 ----
@@ -295,16 +309,15 @@ async function checkWeeklyBehind(now: { date: string; time: string }, s: AlertSe
   });
 }
 
-async function checkMonthlyShort(now: { date: string; time: string }, s: AlertSettings): Promise<void> {
+async function checkPeriodShort(now: { date: string; time: string }, s: AlertSettings): Promise<void> {
   if (!s.monthlyShort || !inWindow(now.time, s.checkTime)) return;
-  const month = now.date.slice(0, 7);
-  const { to } = monthRange(month);
-  if (addDays(to, -s.monthlyShortDays) !== now.date) return;
-  await sendOnce(`monthlyShort:${month}`, async () => {
-    const short = (await listMonthly(month)).filter((g) => g.count < g.target);
+  const { period } = await lookupPeriod(now.date);
+  if (!period || addDays(period.endDate, -s.monthlyShortDays) !== now.date) return;
+  await sendOnce(`periodShort:${period.id}:${period.endDate}`, async () => {
+    const short = period.goals.filter((g) => g.count < g.target);
     if (short.length === 0) return null;
     return [
-      `📅 <b>월말까지 ${s.monthlyShortDays}일 남았어요.</b> 아직 못 채운 이번 달 목표`,
+      `📅 <b>${period.weeks}주 목표가 ${s.monthlyShortDays}일 남았어요</b> (${md(period.endDate)}까지). 아직 못 채운 목표`,
       ...short.map((g) => g.kind === 'check'
         ? `▫️ ${esc(g.name)}`
         : `▫️ ${esc(g.name)} ${g.count}/${g.target} · ${g.target - g.count} 더`),
@@ -342,11 +355,11 @@ async function checkAchieved(now: { date: string }, silent: boolean): Promise<vo
   if (stats.length > 0 && stats.every((g) => g.count >= g.target)) {
     await sendOnce(`achieved:weekAll:${start}`, async () => `🏆 <b>이번 주 목표를 모두 채웠어요!</b>`, silent);
   }
-  const month = now.date.slice(0, 7);
-  for (const g of await listMonthly(month)) {
+  const { period } = await lookupPeriod(now.date);
+  for (const g of period?.goals ?? []) {
     if (g.count >= g.target) {
-      await sendOnce(`achieved:month:${month}:${g.id}`, async () =>
-        `🎉 이번 달 목표 달성: <b>${esc(g.name)}</b>${g.kind === 'count' ? ` (${g.count}/${g.target})` : ''}`, silent);
+      await sendOnce(`achieved:period:${g.id}`, async () =>
+        `🎉 ${period!.weeks}주 목표 달성: <b>${esc(g.name)}</b>${g.kind === 'count' ? ` (${g.count}/${g.target})` : ''}`, silent);
     }
   }
 }
@@ -360,7 +373,7 @@ export async function markAchievedSilently(): Promise<void> {
   await checkAchieved(nowLocal(), true);
 }
 
-/** 봇의 /week: 이번 주(일~토) 지금까지의 진행과 이번 달 목표 */
+/** 봇의 /week: 이번 주(일~토) 지금까지의 진행과 기간 목표 */
 export async function weekText(today: string): Promise<string> {
   const start = weekStartOf(today);
   const stats = await weekStats(start);
@@ -373,7 +386,7 @@ export async function weekText(today: string): Promise<string> {
       : `목표 ${met}/${stats.length}개 달성${met === stats.length ? ' 🏆' : ''}`,
     ...stats.map((g) => `${g.count >= g.target ? '✅' : '▫️'} ${esc(g.name)} ${g.count}/${g.target}`),
     '',
-    await monthText(today.slice(0, 7)),
+    await periodText(today),
   ];
   return lines.join('\n');
 }
@@ -393,7 +406,7 @@ export async function summaryText(today: string): Promise<string> {
       : `목표 ${met}/${stats.length}개 달성${met === stats.length ? ' 🏆' : ''} · 운동한 날 ${Number(days[0]?.n ?? 0)}일`,
     ...stats.map((g) => `${g.count >= g.target ? '✅' : '▫️'} ${esc(g.name)} ${g.count}/${g.target}`),
     '',
-    await monthText(today.slice(0, 7)),
+    await periodText(today),
   ];
   return lines.join('\n');
 }
@@ -420,7 +433,7 @@ export async function alertTick(): Promise<void> {
     const steps: [string, () => Promise<void>][] = [
       ['특정일', () => checkReminders(now)],
       ['주간 밀림', () => checkWeeklyBehind(now, s)],
-      ['월 부족', () => checkMonthlyShort(now, s)],
+      ['기간 부족', () => checkPeriodShort(now, s)],
       ['운동 공백', () => checkIdle(now, s)],
       ['달성', () => checkAchieved(now, !s.achieved)],
       ['주간 요약', () => checkSummary(now, s)],
