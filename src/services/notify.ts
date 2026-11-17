@@ -11,7 +11,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { PrismaClient } from '@prisma/client';
 import { ensurePlanTables } from './plans.js';
-import { alertTick, monthText, summaryText } from './alerts.js';
+import { alertTick, monthText, weekText } from './alerts.js';
 
 const dbUrl = process.env.DATABASE_URL && process.env.DATABASE_URL !== 'undefined'
   ? process.env.DATABASE_URL.replace(/"/g, '')
@@ -312,14 +312,14 @@ async function handleMessage(msg: any): Promise<void> {
     await sendMessage(
       chatId,
       '연결됐어요. 일정 시작 시각, 정해 둔 날짜 알림, 목표 상황을 여기로 알려 드릴게요.\n'
-        + '/today 오늘 일정 · /month 이번 달 목표 · /week 주간 요약',
+        + '/today 오늘 일정 · /month 이번 달 목표 · /week 이번 주 진행',
     );
   } else if (command === '/today' && registered) {
     await sendMessage(chatId, await todayText());
   } else if (command === '/month' && registered) {
     await sendMessage(chatId, await monthText(nowLocal().date.slice(0, 7)));
   } else if (command === '/week' && registered) {
-    await sendMessage(chatId, await summaryText(nowLocal().date));
+    await sendMessage(chatId, await weekText(nowLocal().date));
   }
 }
 

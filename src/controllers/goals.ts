@@ -1,6 +1,7 @@
 import type { Request, Response } from 'express';
 import * as goals from '../services/goals.js';
 import { deleteMonthlyForGoal } from '../services/monthly.js';
+import { markAchievedSilently } from '../services/alerts.js';
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -59,6 +60,8 @@ export const putGoal = async (req: Request, res: Response) => {
     if (typeof g === 'string') return fail(res, 400, g);
     const updated = await goals.updateGoal(id, g);
     if (!updated) return fail(res, 404, '목표를 찾을 수 없습니다.');
+    // 주 횟수를 낮춰서 이미 채워진 상태가 되면 "달성!" 알림 없이 넘어간다
+    await markAchievedSilently().catch((e) => console.error('[goals]', e));
     res.json(updated);
   } catch (e) {
     serverError(res, e);
